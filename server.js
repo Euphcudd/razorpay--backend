@@ -73,25 +73,65 @@ app.post("/verify-payment", async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
 
+    // Verify signature
     const hmac = crypto.createHmac("sha256", process.env.RAZORPAY_KEY_SECRET);
     hmac.update(`${razorpay_order_id}|${razorpay_payment_id}`);
     const digest = hmac.digest("hex");
 
-    if (digest === razorpay_signature) {
-      const orderRef = db.collection("orders").doc(razorpay_order_id);
-      await orderRef.update({
-        status: "paid",
-        paymentId: razorpay_payment_id,
-        paidAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      res.json({ success: true, message: "Payment verified and order updated" });
-    } else {
-      res.status(400).json({ success: false, message: "Payment verification failed " });
+    if (digest !== razorpay_signature) {
+      return res.status(400).json({ success: false, message: "Payment verification failed" });
     }
+
+    // ✅ Fetch order from Firestore
+    const orderRef = db.collection("orders").doc(razorpay_order_id);
+    const orderSnap = await orderRef.get();
+    if (!orderSnap.exists) {
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    const orderData = orderSnap.data();
+
+    // ✅ Update order status
+    await orderRef.update({
+      status: "paid",
+      paymentId: razorpay_payment_id,
+      paidAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // ✅ Update stock for items
+    for (const item of orderData.items) {
+      const plantRef = db.collection("plants").doc(item.plantId);
+      const plantSnap = await plantRef.get();
+      if (!plantSnap.exists) continue;
+
+      const plantData = plantSnap.data();
+      if (item.varietyId && plantData.varieties) {
+        const updatedVarieties = plantData.varieties.map(v => {
+          if (v.id === item.varietyId) {
+            return { ...v, isAvailable: false, isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() };
+          }
+          return v;
+        });
+        await plantRef.update({
+          varieties: updatedVarieties,
+          isAvailable: updatedVarieties.some(v => v.isAvailable === true),
+        });
+      } else {
+        await plantRef.update({
+          isAvailable: false,
+          isReserved: false,
+          reservedUntil: admin.firestore.FieldValue.delete(),
+        });
+      }
+    }
+
+    // ✅ Optional: send order notification here
+    // await sendOrderNotification(orderData);
+
+    res.json({ success: true, orderId: orderData.orderId, customerName: orderData.address?.name });
   } catch (err) {
     console.error("❌ Error verifying payment:", err);
-    res.status(500).json({ error: "Failed to verify payment" });
+    res.status(500).json({ success: false, message: "Failed to verify payment" });
   }
 });
 
