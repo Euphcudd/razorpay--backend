@@ -5,15 +5,16 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const crypto = require("crypto");
 const admin = require("firebase-admin");
-const fs = require("fs");
 
 dotenv.config();
 
-// ✅ Firebase Admin SDK
-const serviceAccount = require("./serviceAccountKey.json"); // replace with your key path
-
+// ✅ Firebase Admin SDK using environment variables
 admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
+  credential: admin.credential.cert({
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+  }),
 });
 
 const db = admin.firestore();
@@ -77,7 +78,6 @@ app.post("/verify-payment", async (req, res) => {
     const digest = hmac.digest("hex");
 
     if (digest === razorpay_signature) {
-      // Update Firestore order status
       const orderRef = db.collection("orders").doc(razorpay_order_id);
       await orderRef.update({
         status: "paid",
