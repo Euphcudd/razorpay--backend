@@ -50,16 +50,16 @@ app.post("/create-order", async (req, res) => {
     const order = await razorpay.orders.create(options);
 
     // Save initial order in Firestore
-    await db.collection("orders").doc(order.id).set({
-      orderId: order.id,
-      receipt: options.receipt,
-      userId,
-      items,
-      amount,
-      currency,
-      status: "pending_payment",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+   await db.collection("orders").doc(order.id).set({
+  orderId: order.id,
+  receipt: options.receipt,
+  userId,
+  items,
+  amount,
+  currency,
+  status: "pending_payment",
+  createdAt: admin.firestore.FieldValue.serverTimestamp(),
+});
 
     res.json(order);
   } catch (err) {
@@ -87,7 +87,7 @@ app.post("/verify-payment", async (req, res) => {
 
       res.json({ success: true, message: "Payment verified and order updated" });
     } else {
-      res.status(400).json({ success: false, message: "Payment verification failed" });
+      res.status(400).json({ success: false, message: "Payment verification failed " });
     }
   } catch (err) {
     console.error("❌ Error verifying payment:", err);
