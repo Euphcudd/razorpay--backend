@@ -211,45 +211,80 @@ admin.initializeApp({
 
 const db = admin.firestore();
 
+// 🔒 Middleware: Verify Firebase ID token
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  try {
+    const idToken = authHeader.split("Bearer ")[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.user = decoded; // contains uid, email, etc.
+    next();
+  } catch (err) {
+    console.error("❌ Firebase Auth verification failed:", err);
+    return res.status(401).json({ error: "Invalid token" });
+  }
+};
+
 // ✅ Express setup
 const app = express();
 app.use(cors({
   origin: ["https://retrofifty.com"], // replace with your frontend URL
 }));
-app.use(express.json());
+// 🔹 Raw parser only for webhook
+app.use("/webhook", express.raw({ type: "application/json" }));
 
+// 🔹 JSON parser for all other routes
+app.use(express.json());
 // ✅ Razorpay instance
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+
+// 🔒 Secure only order routes (not webhook, not health check)
+app.use("/create-order", verifyFirebaseToken);
+app.use("/verify-payment", verifyFirebaseToken);
+
+
+
 // 🟢 Create Order
 app.post("/create-order", async (req, res) => {
-  console.log("⚡ [CREATE ORDER] Request body:", req.body);
-  try {
-    const { amount, currency = "INR", receipt, userId, items } = req.body;
+  console.log("⚡ [CREATE ORDER] Incoming request:", req.body);
 
+  try {
+     const { amount, currency = "INR", receipt, items } = req.body;
+const userId = req.user.uid; // 🔒 trusted from token
+
+    // ✅ Validate required fields
     if (!amount || !userId || !items) {
-      console.warn("❌ Missing fields in create-order:", req.body);
+      console.warn("❌ Missing required fields:", req.body);
       return res.status(400).json({ error: "Missing required fields" });
     }
 
+    // ✅ Create Razorpay order
     const options = {
       amount: amount * 100, // convert to paise
       currency,
       receipt: receipt || `rcpt_${Date.now()}`,
     };
-
     console.log("📤 Creating Razorpay order with options:", options);
 
     const order = await razorpay.orders.create(options);
-    console.log("✅ Razorpay Order created:", order);
+    console.log("✅ Razorpay Order created successfully:", order);
 
-    // Save initial order in Firestore
-    await db.collection("orders").doc(order.id).set({
-      orderId: order.id,
-      razorpay_order_id: order.id,
+    // ✅ Generate custom numeric orderId
+    const customOrderId = Date.now().toString(); // e.g., "1757744203866"
+    console.log("🆔 Generated customOrderId:", customOrderId);
+
+    // ✅ Save order in Firestore with numeric ID
+    await db.collection("orders").doc(customOrderId).set({
+      orderId: customOrderId,         // 🔹 Customer-facing numeric ID
+      razorpay_order_id: order.id,    // 🔹 Mapping to Razorpay order
       receipt: options.receipt,
       userId,
       items,
@@ -258,12 +293,18 @@ app.post("/create-order", async (req, res) => {
       status: "pending_payment",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    console.log(`📝 Firestore order saved with ID: ${order.id}`);
 
-    res.json(order);
+    console.log(`📝 Firestore order saved with docId: ${customOrderId}, linked Razorpay ID: ${order.id}`);
+
+    // ✅ Return both IDs to frontend
+    res.json({
+      ...order,
+      customOrderId, // this will be used in your app for tracking
+    });
+
   } catch (err) {
-    console.error("❌ Error creating Razorpay order:", err);
-    res.status(500).json({ error: "Failed to create order" });
+    console.error("❌ Error in /create-order:", err);
+    res.status(500).json({ error: "Failed to create order", details: err.message });
   }
 });
 
@@ -288,15 +329,20 @@ app.post("/verify-payment", async (req, res) => {
 
     console.log("✅ Signature verified successfully");
 
-    // ✅ Fetch order from Firestore
-    const orderRef = db.collection("orders").doc(razorpay_order_id);
-    const orderSnap = await orderRef.get();
-    if (!orderSnap.exists) {
-      console.warn("❌ Firestore order not found:", razorpay_order_id);
-      return res.status(404).json({ success: false, message: "Order not found" });
-    }
+    
+// ✅ Find Firestore order by Razorpay order ID
+const snap = await db.collection("orders")
+  .where("razorpay_order_id", "==", razorpay_order_id)
+  .limit(1)
+  .get();
 
-    const orderData = orderSnap.data();
+if (snap.empty) {
+  console.warn("❌ Firestore order not found:", razorpay_order_id);
+  return res.status(404).json({ success: false, message: "Order not found" });
+}
+
+const orderRef = snap.docs[0].ref;
+const orderData = snap.docs[0].data();
     console.log("📥 Firestore order data:", orderData);
 
     // ✅ Update order status
@@ -348,58 +394,74 @@ app.post("/verify-payment", async (req, res) => {
   }
 });
 
-// 🟢 Webhook Endpoint (source of truth)
-app.post("/webhook", async (req, res) => {
-  console.log("⚡ [WEBHOOK] Event received:", req.body);
 
+
+
+
+// 🟢 Webhook Endpoint (source of truth)
+// 🟢 Webhook Endpoint
+app.post("/webhook", async (req, res) => {
   const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
   const signature = req.headers["x-razorpay-signature"];
-  const body = JSON.stringify(req.body);
+  
+  const bodyString = req.body.toString("utf8");
+  const bodyJson = JSON.parse(bodyString);
 
+  // Verify signature
   const expectedSignature = crypto.createHmac("sha256", webhookSecret)
-                                  .update(body)
+                                  .update(bodyString)
                                   .digest("hex");
 
-  console.log("🔐 Expected webhook signature:", expectedSignature);
-  console.log("🔐 Received webhook signature:", signature);
-
   if (signature !== expectedSignature) {
-    console.warn("⚠️ Invalid webhook signature");
     return res.status(400).send("Invalid signature");
   }
 
-  const event = req.body.event;
-  const payment = req.body.payload.payment.entity;
-  const orderId = payment.order_id;
+  const event = bodyJson.event;
+  const payment = bodyJson.payload.payment.entity;
+  const razorpayOrderId = payment.order_id;
 
-  console.log(`📡 Webhook Event: ${event}, OrderID: ${orderId}, PaymentID: ${payment.id}`);
+  console.log(`📡 Webhook Event: ${event}, RazorpayOrderID: ${razorpayOrderId}, PaymentID: ${payment.id}`);
 
   try {
-    const orderRef = db.collection("orders").doc(orderId);
+    // 🔎 Find Firestore order by razorpay_order_id
+    const snap = await db.collection("orders")
+      .where("razorpay_order_id", "==", razorpayOrderId)
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      console.error("❌ No Firestore order found for RazorpayOrderID:", razorpayOrderId);
+      return res.status(404).send({ error: "Order not found" });
+    }
+
+    const docRef = snap.docs[0].ref;
+    const orderId = snap.docs[0].id; // custom numeric orderId
+    console.log(`📝 Found Firestore order: ${orderId} (maps to Razorpay: ${razorpayOrderId})`);
 
     if (event === "payment.captured") {
-      await orderRef.update({
+      await docRef.update({
         status: "paid",
         paymentId: payment.id,
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
       });
       console.log(`✅ Webhook: Order ${orderId} marked as PAID`);
     } else if (event === "payment.failed") {
-      await orderRef.update({
+      await docRef.update({
         status: "payment_failed",
-        failureReason: payment.error_reason,
+        failureReason: payment.error_reason || "Unknown",
       });
       console.log(`❌ Webhook: Order ${orderId} marked as FAILED (${payment.error_reason})`);
     } else {
       console.log(`ℹ️ Webhook event ignored: ${event}`);
     }
 
-    res.status(200).send({ status: "ok" });
+    return res.status(200).send({ status: "ok" });
   } catch (err) {
     console.error("❌ Webhook processing error:", err);
-    res.status(500).send({ error: err.message });
+    return res.status(500).send({ error: err.message });
   }
 });
+
 
 // 🟢 Health Check
 app.get("/", (req, res) => {
