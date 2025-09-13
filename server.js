@@ -320,32 +320,53 @@ app.post("/verify-payment", async (req, res) => {
     console.log("✅ Order marked as placed");
 
     // 🔄 Update stock & clear reservations
-    for (const item of orderData.items) {
-      try {
-        console.log("📦 Processing item:", item);
-        const plantRef = db.collection("plants").doc(item.plantId);
-        const plantSnap = await plantRef.get();
+   for (const item of orderData.items) {
+  try {
+    console.log("📦 Processing item:", item);
+    const plantRef = db.collection("plants").doc(item.plantId);
+    const plantSnap = await plantRef.get();
 
-        if (!plantSnap.exists) {
-          console.warn("⚠️ Plant not found:", item.plantId);
-          continue;
-        }
-
-        const plantData = plantSnap.data();
-        if (item.varietyId && Array.isArray(plantData.varieties)) {
-          const updatedVarieties = plantData.varieties.map(v =>
-            v.id === item.varietyId ? { ...v, isAvailable: false, isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() } : v
-          );
-          await plantRef.update({ varieties: updatedVarieties, isAvailable: updatedVarieties.some(v => v.isAvailable) });
-          console.log(`✅ Variety ${item.varietyId} marked unavailable`);
-        } else {
-          await plantRef.update({ isAvailable: false, isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() });
-          console.log(`✅ Plant ${item.plantId} updated (single variant)`);
-        }
-      } catch (err) {
-        console.error("❌ Failed to update stock for item:", item, err);
-      }
+    if (!plantSnap.exists) {
+      console.warn("⚠️ Plant not found:", item.plantId);
+      continue;
     }
+
+    const plantData = plantSnap.data();
+    const varietyId = item.varietyId;
+
+    // CASE 1: Plant has varieties
+    if (plantData.varieties && Array.isArray(plantData.varieties) && plantData.varieties.length > 0 && varietyId) {
+      const updatedVarieties = plantData.varieties.map(v => {
+        if (v.id === varietyId) {
+          const updated = { ...v, isAvailable: false, isReserved: false };
+          delete updated.reservedUntil;
+          return updated;
+        }
+        return v;
+      });
+
+      const anyAvailable = updatedVarieties.some(v => v.isAvailable);
+
+      await plantRef.update({
+        varieties: updatedVarieties,
+        isAvailable: anyAvailable, // false if all sold
+      });
+
+      console.log(`✅ Plant ${item.plantId} updated (variety ${varietyId}). Available? ${anyAvailable}`);
+    } 
+    // CASE 2: Plant has no varieties → mark sold
+    else {
+      await plantRef.update({
+        isAvailable: false,
+        isReserved: false,
+        reservedUntil: admin.firestore.FieldValue.delete(),
+      });
+      console.log(`✅ Plant ${item.plantId} marked as sold (no varieties)`);
+    }
+  } catch (err) {
+    console.error("❌ Failed to update stock for item:", item, err);
+  }
+}
 
     res.json({ success: true, orderId: orderData.orderId, customerName: orderData.address?.name });
   } catch (err) {
@@ -385,10 +406,10 @@ app.post("/webhook", async (req, res) => {
     const orderId = snap.docs[0].id;
 
     if (event === "payment.captured") {
-      await docRef.update({ paymentstatus: "paid", paymentId: payment.id, paidAt: admin.firestore.FieldValue.serverTimestamp() });
+      await docRef.update({ status: "placed", paymentId: payment.id, paidAt: admin.firestore.FieldValue.serverTimestamp() });
       console.log(`✅ Webhook: Order ${orderId} marked PAID`);
     } else if (event === "payment.failed") {
-      await docRef.update({ paymentstatus: "failed", failureReason: payment.error_reason || "Unknown" });
+      await docRef.update({ status: "failed", failureReason: payment.error_reason || "Unknown" });
       console.log(`❌ Webhook: Order ${orderId} marked FAILED (${payment.error_reason})`);
     } else {
       console.log(`ℹ️ Webhook event ignored: ${event}`);
