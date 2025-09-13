@@ -316,8 +316,8 @@ app.post("/verify-payment", async (req, res) => {
     const orderData = snap.docs[0].data();
     console.log("📥 Firestore order data:", JSON.stringify(orderData, null, 2));
 
-    await orderRef.update({ status: "paid", paymentId: razorpay_payment_id, paidAt: admin.firestore.FieldValue.serverTimestamp() });
-    console.log("✅ Order marked as paid");
+    await orderRef.update({ status: "placed", paymentId: razorpay_payment_id, paidAt: admin.firestore.FieldValue.serverTimestamp() });
+    console.log("✅ Order marked as placed");
 
     // 🔄 Update stock & clear reservations
     for (const item of orderData.items) {
@@ -385,10 +385,10 @@ app.post("/webhook", async (req, res) => {
     const orderId = snap.docs[0].id;
 
     if (event === "payment.captured") {
-      await docRef.update({ status: "paid", paymentId: payment.id, paidAt: admin.firestore.FieldValue.serverTimestamp() });
+      await docRef.update({ paymentstatus: "paid", paymentId: payment.id, paidAt: admin.firestore.FieldValue.serverTimestamp() });
       console.log(`✅ Webhook: Order ${orderId} marked PAID`);
     } else if (event === "payment.failed") {
-      await docRef.update({ status: "payment_failed", failureReason: payment.error_reason || "Unknown" });
+      await docRef.update({ paymentstatus: "failed", failureReason: payment.error_reason || "Unknown" });
       console.log(`❌ Webhook: Order ${orderId} marked FAILED (${payment.error_reason})`);
     } else {
       console.log(`ℹ️ Webhook event ignored: ${event}`);
