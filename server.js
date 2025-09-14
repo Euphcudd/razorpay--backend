@@ -352,6 +352,36 @@ app.post("/webhook", async (req, res) => {
     const orderId = snap.docs[0].id;
 
     if (event === "payment.captured") {
+
+      for (const item of orderData.items) {
+    const plantRef = db.collection("plants").doc(item.plantId);
+    const plantSnap = await plantRef.get();
+    if (!plantSnap.exists) {
+      console.warn("⚠️ Plant not found:", item.plantId);
+      continue;
+    }
+
+    const plantData = plantSnap.data();
+    const varietyId = item.varietyId;
+
+    // Check if item is still available
+    let available = false;
+
+    if (varietyId && plantData.varieties && Array.isArray(plantData.varieties)) {
+      const variety = plantData.varieties.find(v => v.id === varietyId);
+      available = variety?.isAvailable && (!variety.reservedUntil || variety.reservedUntil.toMillis() > Date.now());
+    } else {
+      available = plantData.isAvailable && (!plantData.reservedUntil || plantData.reservedUntil.toMillis() > Date.now());
+    }
+
+    if (!available) {
+      // ❌ Item already sold → refund payment
+      console.log(`⚠️ Item ${item.plantId} (variety ${varietyId}) not available. Refunding...`);
+      await razorpay.payments.refund(payment.id, { amount: payment.amount }); // optional: full or partial amount
+      await docRef.update({ status: "failed", failureReason: "Item no longer available" });
+      return res.status(400).json({ success: false, message: "Item no longer available. Payment refunded." });
+    }
+  }
       // ✅ Update order status
       await docRef.update({
         status: "placed",
