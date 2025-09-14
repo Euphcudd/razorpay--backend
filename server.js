@@ -258,8 +258,11 @@ app.post("/create-order", async (req, res) => {
       console.warn("❌ Missing required fields:", req.body);
       return res.status(400).json({ error: "Missing required fields" });
     }
-
-    const options = { amount: amount * 100, currency, receipt: receipt || `rcpt_${Date.now()}` };
+const expirySeconds = Math.floor(Date.now() / 1000) + 300;
+    const options = { amount: amount * 100, currency,  notes: { userId },
+  // Razorpay supports expiry for Orders
+  payment_capture: 1,
+  expire_by: expirySeconds, receipt: receipt || `rcpt_${Date.now()}` };
     console.log("📤 Creating Razorpay order with options:", options);
 
     const order = await razorpay.orders.create(options);
