@@ -378,7 +378,7 @@ app.post("/webhook", async (req, res) => {
       // ❌ Item already sold → refund payment
       console.log(`⚠️ Item ${item.plantId} (variety ${varietyId}) not available. Refunding...`);
       await razorpay.payments.refund(payment.id, { amount: payment.amount }); // optional: full or partial amount
-      await docRef.update({ status: "failed", failureReason: "Item no longer available" });
+      await docRef.update({ status: "refunded", failureReason: "Item no longer available" });
       return res.status(400).json({ success: false, message: "Item no longer available. Payment refunded." });
     }
   }
