@@ -339,38 +339,56 @@ app.post("/verify-payment", async (req, res) => {
 
 
 
-// 🟢 WEBHOOK
+// // 🟢 WEBHOOK
+
 app.post("/webhook", async (req, res) => {
   const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
   const signature = req.headers["x-razorpay-signature"];
   const bodyString = req.body.toString("utf8");
 
-  // Verify webhook signature
+  // Verify signature
   const expectedSignature = crypto.createHmac("sha256", webhookSecret).update(bodyString).digest("hex");
   if (signature !== expectedSignature) {
     console.warn("⚠️ Invalid webhook signature");
     return res.status(400).send("Invalid signature");
   }
 
-  const bodyJson = JSON.parse(bodyString);
-  const event = bodyJson.event;
-  const payment = bodyJson.payload.payment.entity;
-  const razorpayOrderId = payment.order_id;
+  // ✅ Respond immediately
+  res.status(200).send({ status: "ok" });
 
-  console.log(`📡 Webhook Event: ${event}, RazorpayOrderID: ${razorpayOrderId}, PaymentID: ${payment.id}`);
+  // ✅ Process asynchronously
+  processWebhook(bodyString);
+});
 
+
+
+async function processWebhook(bodyString) {
   try {
-    const snap = await db.collection("orders").where("razorpay_order_id", "==", razorpayOrderId).limit(1).get();
+    const bodyJson = JSON.parse(bodyString);
+    const event = bodyJson.event;
+    const payment = bodyJson.payload.payment.entity;
+    const razorpayOrderId = payment.order_id;
+
+    const snap = await db.collection("orders")
+      .where("razorpay_order_id", "==", razorpayOrderId)
+      .limit(1)
+      .get();
+
     if (snap.empty) {
       console.error("❌ No order found for RazorpayOrderID:", razorpayOrderId);
-      return res.status(404).send({ error: "Order not found" });
+      return;
     }
 
     const docRef = snap.docs[0].ref;
     const orderData = snap.docs[0].data();
     const orderId = snap.docs[0].id;
 
-    if (event === "payment.captured") {
+    // Idempotency: skip if already processed
+    if (["placed", "refunded", "failed"].includes(orderData.status)) {
+      console.log(`ℹ️ Order ${orderId} already processed. Skipping.`);
+      return;
+    }
+if (event === "payment.captured") {
 
       for (const item of orderData.items) {
     const plantRef = db.collection("plants").doc(item.plantId);
@@ -533,12 +551,211 @@ else {
       console.log(`ℹ️ Webhook event ignored: ${event}`);
     }
 
-    return res.status(200).send({ status: "ok" });
   } catch (err) {
-    console.error("❌ Webhook processing error:", err);
-    return res.status(500).send({ error: err.message });
+    console.error("❌ Webhook async processing error:", err);
   }
-});
+}
+
+
+// app.post("/webhook", async (req, res) => {
+//   const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+//   const signature = req.headers["x-razorpay-signature"];
+//   const bodyString = req.body.toString("utf8");
+
+//   // Verify webhook signature
+//   const expectedSignature = crypto.createHmac("sha256", webhookSecret).update(bodyString).digest("hex");
+//   if (signature !== expectedSignature) {
+//     console.warn("⚠️ Invalid webhook signature");
+//     return res.status(400).send("Invalid signature");
+//   }
+
+//   const bodyJson = JSON.parse(bodyString);
+//   const event = bodyJson.event;
+//   const payment = bodyJson.payload.payment.entity;
+//   const razorpayOrderId = payment.order_id;
+
+//   console.log(`📡 Webhook Event: ${event}, RazorpayOrderID: ${razorpayOrderId}, PaymentID: ${payment.id}`);
+
+//   try {
+//     const snap = await db.collection("orders").where("razorpay_order_id", "==", razorpayOrderId).limit(1).get();
+//     if (snap.empty) {
+//       console.error("❌ No order found for RazorpayOrderID:", razorpayOrderId);
+//       return res.status(404).send({ error: "Order not found" });
+//     }
+
+//     const docRef = snap.docs[0].ref;
+//     const orderData = snap.docs[0].data();
+//     const orderId = snap.docs[0].id;
+
+//     if (event === "payment.captured") {
+
+//       for (const item of orderData.items) {
+//     const plantRef = db.collection("plants").doc(item.plantId);
+//     const plantSnap = await plantRef.get();
+//     if (!plantSnap.exists) {
+//       console.warn("⚠️ Plant not found:", item.plantId);
+//       continue;
+//     }
+
+//     const plantData = plantSnap.data();
+//     const varietyId = item.varietyId;
+
+//     // Check if item is still available
+//     let available = false;
+
+//     if (varietyId && plantData.varieties && Array.isArray(plantData.varieties)) {
+//       const variety = plantData.varieties.find(v => v.id === varietyId);
+//       available = variety?.isAvailable && (!variety.reservedUntil || variety.reservedUntil.toMillis() > Date.now());
+//     } else {
+//       available = plantData.isAvailable && (!plantData.reservedUntil || plantData.reservedUntil.toMillis() > Date.now());
+//     }
+
+//     if (!available) {
+//       // ❌ Item already sold → refund payment
+//       console.log(`⚠️ Item ${item.plantId} (variety ${varietyId}) not available. Refunding...`);
+//       await razorpay.payments.refund(payment.id, { amount: payment.amount }); // optional: full or partial amount
+//       await docRef.update({ status: "refunded", failureReason: "Item no longer available" });
+//       return res.status(400).json({ success: false, message: "Item no longer available. Payment refunded." });
+//     }
+//   }
+//       // ✅ Update order status
+//       await docRef.update({
+//         status: "placed",
+//         paymentId: payment.id,
+//         paidAt: admin.firestore.FieldValue.serverTimestamp(),
+//       });
+//       console.log(`✅ Webhook: Order ${orderId} marked PAID`);
+
+//       // 🔄 Update stock
+//       for (const item of orderData.items) {
+//         try {
+//           const plantRef = db.collection("plants").doc(item.plantId);
+//           const plantSnap = await plantRef.get();
+//           if (!plantSnap.exists) {
+//             console.warn("⚠️ Plant not found:", item.plantId);
+//             continue;
+//           }
+
+//           const plantData = plantSnap.data();
+//           const varietyId = item.varietyId;
+
+//           // CASE 1: Plant has varieties
+//           if (plantData.varieties && Array.isArray(plantData.varieties) && plantData.varieties.length > 0 && varietyId) {
+//             const updatedVarieties = plantData.varieties.map(v => {
+//               if (v.id === varietyId) {
+//                 const updated = { ...v, isAvailable: false, isReserved: false };
+//                 delete updated.reservedUntil;
+//                 return updated;
+//               }
+//               return v;
+//             });
+
+//             const anyAvailable = updatedVarieties.some(v => v.isAvailable);
+
+//             await plantRef.update({
+//               varieties: updatedVarieties,
+//               isAvailable: anyAvailable, // false if all sold
+//             });
+
+//             console.log(`✅ Plant ${item.plantId} updated (variety ${varietyId}). Available? ${anyAvailable}`);
+//           }
+//           // CASE 2: Plant has no varieties → mark sold
+//           else {
+//             await plantRef.update({
+//               isAvailable: false,
+//               isReserved: false,
+//               reservedUntil: admin.firestore.FieldValue.delete(),
+//             });
+//             console.log(`✅ Plant ${item.plantId} marked as sold (no varieties)`);
+//           }
+//         } catch (err) {
+//           console.error("❌ Failed to update stock for item:", item, err);
+//         }
+//       }
+
+//       console.log(`✅ Webhook: Stock update completed for order ${orderId}`);
+//     } else if (event === "payment.failed") {
+//   const orderDoc = snap.docs[0];
+//   const orderData = orderDoc.data();
+//   const userId = orderData.userId;
+
+//   // // Clear reservations for each item
+//   // for (const item of orderData.items) {
+//   //   const plantRef = db.collection("plants").doc(item.plantId);
+//   //   const plantSnap = await plantRef.get();
+//   //   if (!plantSnap.exists) continue;
+
+//   //   const plantData = plantSnap.data();
+//   //   const varietyId = item.varietyId;
+
+//   //   // CASE 1: Varieties
+//   //   if (varietyId && plantData.varieties && Array.isArray(plantData.varieties)) {
+//   //     const updatedVarieties = plantData.varieties.map(v => {
+//   //       if (v.id === varietyId) {
+//   //         return { ...v, isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() };
+//   //       }
+//   //       return v;
+//   //     });
+//   //     await plantRef.update({ varieties: updatedVarieties });
+//   //     console.log(`🧹 Cleared reservation for plant ${item.plantId}, variety ${varietyId}`);
+//   //   } 
+//   //   // CASE 2: Plant-level
+//   //   else if (plantData.isReserved) {
+//   //     await plantRef.update({ isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() });
+//   //     console.log(`🧹 Cleared reservation for plant ${item.plantId}`);
+//   //   }
+//   // }
+
+//   // Update order status
+//   await orderDoc.ref.update({ status: "failed", failureReason: payment.error_reason || "Unknown" });
+//   console.log(`❌ Order ${orderDoc.id} marked FAILED`);
+// }  else if (event === "order.expired") {
+//   // ⏰ Payment session expired → clear reservations
+//   const orderDoc = snap.docs[0];
+//   const orderData = orderDoc.data();
+
+//   console.log(`⏰ Payment session expired for order ${orderDoc.id}, clearing reservations...`);
+
+//   for (const item of orderData.items) {
+//     const plantRef = db.collection("plants").doc(item.plantId);
+//     const plantSnap = await plantRef.get();
+//     if (!plantSnap.exists) continue;
+
+//     const plantData = plantSnap.data();
+//     const varietyId = item.varietyId;
+
+//     // CASE 1: Plant has varieties
+//     if (varietyId && plantData.varieties && Array.isArray(plantData.varieties)) {
+//       const updatedVarieties = plantData.varieties.map(v => {
+//         if (v.id === varietyId) {
+//           return { ...v, isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() };
+//         }
+//         return v;
+//       });
+//       await plantRef.update({ varieties: updatedVarieties });
+//       console.log(`🧹 Cleared reservation for plant ${item.plantId}, variety ${varietyId}`);
+//     } 
+//     // CASE 2: Plant-level
+//     else if (plantData.isReserved) {
+//       await plantRef.update({ isReserved: false, reservedUntil: admin.firestore.FieldValue.delete() });
+//       console.log(`🧹 Cleared reservation for plant ${item.plantId}`);
+//     }
+//   }
+
+//   // Update order status
+//   await orderDoc.ref.update({ status: "expired" });
+//   console.log(`⏰ Order ${orderDoc.id} marked EXPIRED`);
+// }
+// else {
+//       console.log(`ℹ️ Webhook event ignored: ${event}`);
+//     }
+
+//     return res.status(200).send({ status: "ok" });
+//   } catch (err) {
+//     console.error("❌ Webhook processing error:", err);
+//     return res.status(500).send({ error: err.message });
+//   }
+// });
 
 // 🟢 Health Check
 app.get("/", (req, res) => {
