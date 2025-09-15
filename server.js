@@ -303,15 +303,34 @@ app.post("/verify-payment", async (req, res) => {
     const digest = hmac.digest("hex");
 
     console.log("🔐 Expected digest:", digest, "Received signature:", razorpay_signature);
+
+
+
+
     if (digest !== razorpay_signature) {
       console.warn("❌ Signature mismatch");
       return res.status(400).json({ success: false, message: "Payment verification failed" });
     }
 
     console.log("✅ Signature verified");
+    
+    // 🔍 Now find the Firestore order by Razorpay order id
+    const snap = await db.collection("orders")
+      .where("razorpay_order_id", "==", razorpay_order_id)
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      console.error("❌ No order found for Razorpay order:", razorpay_order_id);
+      return res.status(404).json({ success: false, message: "Order not found" });
+    }
+
+    // Firestore document id = your customOrderId
+    const customOrderId = snap.docs[0].id;
+    
 
     // ✅ Success response to frontend (do NOT touch stock/order)
-    return res.json({ success: true, message: "Payment verified successfully" });
+    return res.json({ success: true, message: "Payment verified successfully",  customOrderId  });
   } catch (err) {
     console.error("❌ /verify-payment error:", err);
     res.status(500).json({ success: false, message: "Failed to verify payment", details: err.message });
